@@ -1,3 +1,5 @@
+
+@'
 pipeline {
     agent any
 
@@ -21,19 +23,25 @@ pipeline {
                 ]) {
                     powershell '''
                         $ErrorActionPreference = "Stop"
-                        kubectl config set-cluster local-cluster --server=https://127.0.0.1:64079 --certificate-authority="$env:K8S_CA"
+                        $kubectl = "C:\\Users\\ishit\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\kubectl.exe"
+
+                        if (-not (Test-Path $kubectl)) {
+                            throw "kubectl.exe not found at $kubectl"
+                        }
+
+                        & $kubectl config set-cluster local-cluster --server=https://127.0.0.1:64079 --certificate-authority="$env:K8S_CA" --embed-certs=true
                         if ($LASTEXITCODE -ne 0) { throw "Failed to configure Kubernetes cluster" }
 
-                        kubectl config set-credentials jenkins-dr --token="$env:K8S_TOKEN"
+                        & $kubectl config set-credentials jenkins-dr --token="$env:K8S_TOKEN"
                         if ($LASTEXITCODE -ne 0) { throw "Failed to configure Kubernetes credentials" }
 
-                        kubectl config set-context jenkins-dr-context --cluster=local-cluster --user=jenkins-dr --namespace=default
+                        & $kubectl config set-context jenkins-dr-context --cluster=local-cluster --user=jenkins-dr --namespace=default
                         if ($LASTEXITCODE -ne 0) { throw "Failed to configure Kubernetes context" }
 
-                        kubectl config use-context jenkins-dr-context
+                        & $kubectl config use-context jenkins-dr-context
                         if ($LASTEXITCODE -ne 0) { throw "Failed to select Kubernetes context" }
 
-                        kubectl get nodes
+                        & $kubectl get nodes
                         if ($LASTEXITCODE -ne 0) { throw "Cannot access Kubernetes API" }
                     '''
                 }
@@ -48,14 +56,16 @@ pipeline {
                 ]) {
                     powershell '''
                         $ErrorActionPreference = "Stop"
-                        kubectl apply -f k8s/app.yaml
+                        $kubectl = "C:\\Users\\ishit\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\kubectl.exe"
+
+                        & $kubectl apply -f k8s/app.yaml
                         if ($LASTEXITCODE -ne 0) { throw "Deployment apply failed" }
 
-                        kubectl rollout status deployment/dr-web --timeout=120s
+                        & $kubectl rollout status deployment/dr-web --timeout=120s
                         if ($LASTEXITCODE -ne 0) { throw "Deployment rollout failed" }
 
-                        kubectl get deployment dr-web
-                        kubectl get pods
+                        & $kubectl get deployment dr-web
+                        & $kubectl get pods
                     '''
                 }
             }
@@ -69,8 +79,12 @@ pipeline {
                 ]) {
                     powershell '''
                         $ErrorActionPreference = "Stop"
+                        $kubectl = "C:\\Users\\ishit\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\kubectl.exe"
 
-                        $pod = kubectl get pods -o name |
+                        $pods = & $kubectl get pods -o name
+                        if ($LASTEXITCODE -ne 0) { throw "Failed to list pods" }
+
+                        $pod = $pods |
                             Where-Object { $_ -match '^pod/dr-web-' } |
                             Select-Object -First 1
 
@@ -79,17 +93,17 @@ pipeline {
                         }
 
                         Write-Host "Simulating failure by deleting $pod"
-                        kubectl delete $pod --wait=true
+                        & $kubectl delete $pod --wait=true
                         if ($LASTEXITCODE -ne 0) { throw "Failed to delete pod" }
 
                         Write-Host "Waiting for Kubernetes to restore two ready replicas"
                         $recovered = $false
 
                         for ($i = 0; $i -lt 60; $i++) {
-                            $ready = kubectl get deployment dr-web -o jsonpath='{.status.readyReplicas}'
+                            $ready = & $kubectl get deployment dr-web -o jsonpath='{.status.readyReplicas}'
                             if ($LASTEXITCODE -ne 0) { throw "Unable to check deployment status" }
 
-                            if ($ready -eq "2") {
+                            if ("$ready".Trim() -eq "2") {
                                 $recovered = $true
                                 break
                             }
@@ -97,8 +111,8 @@ pipeline {
                             Start-Sleep -Seconds 2
                         }
 
-                        kubectl get deployment dr-web
-                        kubectl get pods
+                        & $kubectl get deployment dr-web
+                        & $kubectl get pods
 
                         if (-not $recovered) {
                             throw "RECOVERY FAILED: deployment did not return to two ready replicas"
@@ -117,3 +131,9 @@ pipeline {
         }
     }
 }
+'@ | Set-Content -Encoding utf8 .\Jenkinsfile
+
+$content = Get-Content .\Jenkinsfile -Raw
+$content = $content.TrimStart([char]0xFEFF)
+$utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText("$PWD\Jenkinsfile", $content, $utf8NoBom)
