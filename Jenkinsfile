@@ -16,28 +16,25 @@ pipeline {
         stage('Configure Kubernetes Access') {
             steps {
                 withCredentials([
-                    string(credentialsId: 'k8s-jenkins-token',
-                           variable: 'K8S_TOKEN'),
-                    file(credentialsId: 'k8s-cluster-ca',
-                         variable: 'K8S_CA')
+                    string(credentialsId: 'k8s-jenkins-token', variable: 'K8S_TOKEN'),
+                    file(credentialsId: 'k8s-cluster-ca', variable: 'K8S_CA')
                 ]) {
-                    sh '''
-                        set +x
-                        kubectl config set-cluster local-cluster \
-                          --server=https://192.168.49.2:8443 \
-                          --certificate-authority="$K8S_CA" \
-                          --embed-certs=true
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
+                        kubectl config set-cluster local-cluster --server=https://127.0.0.1:64079 --certificate-authority="$env:K8S_CA"
+                        if ($LASTEXITCODE -ne 0) { throw "Failed to configure Kubernetes cluster" }
 
-                        kubectl config set-credentials jenkins-dr \
-                          --token="$K8S_TOKEN"
+                        kubectl config set-credentials jenkins-dr --token="$env:K8S_TOKEN"
+                        if ($LASTEXITCODE -ne 0) { throw "Failed to configure Kubernetes credentials" }
 
-                        kubectl config set-context jenkins-dr-context \
-                          --cluster=local-cluster \
-                          --user=jenkins-dr \
-                          --namespace=default
+                        kubectl config set-context jenkins-dr-context --cluster=local-cluster --user=jenkins-dr --namespace=default
+                        if ($LASTEXITCODE -ne 0) { throw "Failed to configure Kubernetes context" }
 
                         kubectl config use-context jenkins-dr-context
+                        if ($LASTEXITCODE -ne 0) { throw "Failed to select Kubernetes context" }
+
                         kubectl get nodes
+                        if ($LASTEXITCODE -ne 0) { throw "Cannot access Kubernetes API" }
                     '''
                 }
             }
@@ -46,28 +43,17 @@ pipeline {
         stage('Deploy Application') {
             steps {
                 withCredentials([
-                    string(credentialsId: 'k8s-jenkins-token',
-                           variable: 'K8S_TOKEN'),
-                    file(credentialsId: 'k8s-cluster-ca',
-                         variable: 'K8S_CA')
+                    string(credentialsId: 'k8s-jenkins-token', variable: 'K8S_TOKEN'),
+                    file(credentialsId: 'k8s-cluster-ca', variable: 'K8S_CA')
                 ]) {
-                    sh '''
-                        set +x
-                        kubectl config set-cluster local-cluster \
-                          --server=https://192.168.49.2:8443 \
-                          --certificate-authority="$K8S_CA" \
-                          --embed-certs=true
-                        kubectl config set-credentials jenkins-dr \
-                          --token="$K8S_TOKEN"
-                        kubectl config set-context jenkins-dr-context \
-                          --cluster=local-cluster \
-                          --user=jenkins-dr \
-                          --namespace=default
-                        kubectl config use-context jenkins-dr-context
-
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
                         kubectl apply -f k8s/app.yaml
-                        kubectl rollout status deployment/dr-web \
-                          --timeout=120s
+                        if ($LASTEXITCODE -ne 0) { throw "Deployment apply failed" }
+
+                        kubectl rollout status deployment/dr-web --timeout=120s
+                        if ($LASTEXITCODE -ne 0) { throw "Deployment rollout failed" }
+
                         kubectl get deployment dr-web
                         kubectl get pods
                     '''
@@ -78,56 +64,47 @@ pipeline {
         stage('Simulate Pod Failure') {
             steps {
                 withCredentials([
-                    string(credentialsId: 'k8s-jenkins-token',
-                           variable: 'K8S_TOKEN'),
-                    file(credentialsId: 'k8s-cluster-ca',
-                         variable: 'K8S_CA')
+                    string(credentialsId: 'k8s-jenkins-token', variable: 'K8S_TOKEN'),
+                    file(credentialsId: 'k8s-cluster-ca', variable: 'K8S_CA')
                 ]) {
-                    sh '''
-                        set +x
-                        kubectl config set-cluster local-cluster \
-                          --server=https://192.168.49.2:8443 \
-                          --certificate-authority="$K8S_CA" \
-                          --embed-certs=true
-                        kubectl config set-credentials jenkins-dr \
-                          --token="$K8S_TOKEN"
-                        kubectl config set-context jenkins-dr-context \
-                          --cluster=local-cluster \
-                          --user=jenkins-dr \
-                          --namespace=default
-                        kubectl config use-context jenkins-dr-context
+                    powershell '''
+                        $ErrorActionPreference = "Stop"
 
-                        POD=$(kubectl get pods -o name |
-                          grep '^pod/dr-web-' | head -n 1)
+                        $pod = kubectl get pods -o name |
+                            Where-Object { $_ -match '^pod/dr-web-' } |
+                            Select-Object -First 1
 
-                        if [ -z "$POD" ]; then
-                          echo "ERROR: No dr-web pod found"
-                          exit 1
-                        fi
+                        if (-not $pod) {
+                            throw "No dr-web pod found"
+                        }
 
-                        echo "Simulating failure by deleting $POD"
-                        kubectl delete "$POD" --wait=true
+                        Write-Host "Simulating failure by deleting $pod"
+                        kubectl delete $pod --wait=true
+                        if ($LASTEXITCODE -ne 0) { throw "Failed to delete pod" }
 
-                        echo "Waiting for Kubernetes to restore 2 replicas"
-                        READY=0
-                        for i in $(seq 1 60); do
-                          READY=$(kubectl get deployment dr-web \
-                            -o jsonpath='{.status.readyReplicas}')
-                          if [ "$READY" = "2" ]; then
-                            break
-                          fi
-                          sleep 2
-                        done
+                        Write-Host "Waiting for Kubernetes to restore two ready replicas"
+                        $recovered = $false
 
-                        if [ "$READY" != "2" ]; then
-                          echo "RECOVERY FAILED: expected 2 ready replicas"
-                          kubectl get pods
-                          exit 1
-                        fi
+                        for ($i = 0; $i -lt 60; $i++) {
+                            $ready = kubectl get deployment dr-web -o jsonpath='{.status.readyReplicas}'
+                            if ($LASTEXITCODE -ne 0) { throw "Unable to check deployment status" }
 
-                        echo "RECOVERY SUCCESS: 2 replicas are ready"
+                            if ($ready -eq "2") {
+                                $recovered = $true
+                                break
+                            }
+
+                            Start-Sleep -Seconds 2
+                        }
+
                         kubectl get deployment dr-web
                         kubectl get pods
+
+                        if (-not $recovered) {
+                            throw "RECOVERY FAILED: deployment did not return to two ready replicas"
+                        }
+
+                        Write-Host "RECOVERY SUCCESS: 2 replicas are ready"
                     '''
                 }
             }
