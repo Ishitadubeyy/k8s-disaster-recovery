@@ -67,11 +67,10 @@ pipeline {
                             throw "Failed to select Kubernetes context"
                         }
 
-                        & $kubectl get nodes
-
-                        if ($LASTEXITCODE -ne 0) {
-                            throw "Cannot access Kubernetes API"
-                        }
+                        & $kubectl get deployments -n default
+			if ($LASTEXITCODE -ne 0) {
+    			throw "Cannot access Kubernetes deployments"
+			}
                     '''
                 }
             }
