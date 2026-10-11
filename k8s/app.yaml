@@ -1,0 +1,68 @@
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dr-web-content
+data:
+  index.html: |
+    <!DOCTYPE html>
+    <html>
+    <head><title>Disaster Recovery Demo</title></head>
+    <body>
+      <h1>Disaster Recovery System</h1>
+      <p>Status: Application is running.</p>
+      <p>Kubernetes and Jenkins recovery test project.</p>
+    </body>
+    </html>
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dr-web
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: dr-web
+  template:
+    metadata:
+      labels:
+        app: dr-web
+    spec:
+      containers:
+        - name: web
+          image: nginx:1.28
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          volumeMounts:
+            - name: web-content
+              mountPath: /usr/share/nginx/html/index.html
+              subPath: index.html
+      volumes:
+        - name: web-content
+          configMap:
+            name: dr-web-content
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dr-web-service
+spec:
+  selector:
+    app: dr-web
+  ports:
+    - port: 80
+      targetPort: 80
+  type: NodePort
