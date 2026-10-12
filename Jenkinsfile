@@ -42,28 +42,20 @@ pipeline {
                         $ErrorActionPreference = "Stop"
 
                         if (-not (Test-Path $env:KUBECTL)) {
-                            throw "kubectl was not found at $env:KUBECTL"
+                            throw "kubectl not found: $env:KUBECTL"
                         }
 
-                        $apiHost = "127.0.0.1"
-                        $apiPort = 49706
-
                         $connection = Test-NetConnection `
-                            $apiHost `
-                            -Port $apiPort `
+                            127.0.0.1 -Port 49706 `
                             -WarningAction SilentlyContinue
 
                         if (-not $connection.TcpTestSucceeded) {
-                            throw "Kubernetes API is unreachable at ${apiHost}:${apiPort}. Start Docker Desktop and Minikube."
+                            throw "Kubernetes API is unreachable at $env:K8S_API. Start Minikube and verify its API port."
                         }
 
                         if (-not (Test-Path $env:K8S_CA_FILE)) {
-                            throw "Kubernetes CA certificate was not found."
+                            throw "Kubernetes CA certificate not found."
                         }
-
-                        $configDir = Split-Path $env:KUBECONFIG -Parent
-                        New-Item -ItemType Directory -Force `
-                            -Path $configDir | Out-Null
 
                         if (Test-Path $env:KUBECONFIG) {
                             Remove-Item $env:KUBECONFIG -Force
@@ -100,11 +92,10 @@ pipeline {
                             throw "Failed to select Kubernetes context."
                         }
 
-                        & $env:KUBECTL get deployments `
-                            -n $env:NAMESPACE
+                        & $env:KUBECTL get deployments -n $env:NAMESPACE
 
                         if ($LASTEXITCODE -ne 0) {
-                            throw "Cannot access deployments in the namespace."
+                            throw "Cannot access Kubernetes deployments."
                         }
 
                         Write-Output "Kubernetes access configured successfully."
@@ -117,15 +108,13 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
-
                     $manifest = Join-Path $env:WORKSPACE "k8s\\app.yaml"
 
                     if (-not (Test-Path $manifest)) {
-                        throw "Application manifest not found: $manifest"
+                        throw "Manifest not found: $manifest"
                     }
 
-                    & $env:KUBECTL apply -f $manifest `
-                        -n $env:NAMESPACE
+                    & $env:KUBECTL apply -f $manifest -n $env:NAMESPACE
 
                     if ($LASTEXITCODE -ne 0) {
                         throw "Application deployment failed."
@@ -133,18 +122,10 @@ pipeline {
 
                     & $env:KUBECTL rollout status `
                         "deployment/$env:DEPLOYMENT" `
-                        -n $env:NAMESPACE `
-                        --timeout=120s
+                        -n $env:NAMESPACE --timeout=120s
 
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Application rollout did not complete."
-                    }
-
-                    & $env:KUBECTL get deployment $env:DEPLOYMENT `
-                        -n $env:NAMESPACE
-
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Could not retrieve deployment status."
+                        throw "Application rollout failed."
                     }
 
                     Write-Output "Application deployment verified."
@@ -156,79 +137,64 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
-                    $expectedReplicas = 2
                     $timeoutSeconds = 120
 
+                    $depJson = & $env:KUBECTL get deployment $env:DEPLOYMENT `
+                        -n $env:NAMESPACE -o json
+                    if ($LASTEXITCODE -ne 0) { throw "Cannot read deployment." }
+                    $dep = $depJson | ConvertFrom-Json
+
+                    $selector = ($dep.spec.selector.matchLabels.PSObject.Properties |
+                        ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ","
+
+                    $json = & $env:KUBECTL get pods -n $env:NAMESPACE `
+                        -l $selector -o json
+                    if ($LASTEXITCODE -ne 0) { throw "Cannot list application pods." }
+                    $data = $json | ConvertFrom-Json
+
+                    $readyPods = @($data.items | Where-Object {
+                        -not $_.metadata.deletionTimestamp -and
+                        @($_.status.conditions | Where-Object {
+                            $_.type -eq "Ready" -and $_.status -eq "True"
+                        }).Count -gt 0
+                    })
+
+                    if ($readyPods.Count -ne 2) {
+                        throw "Pre-test check failed: expected 2 ready pods, found $($readyPods.Count)."
+                    }
+
+                    $victim = $readyPods[0].metadata.name
                     Write-Output "FAILURE TYPE: Single pod deletion"
-
-                    $deployment = & $env:KUBECTL get deployment `
-                        $env:DEPLOYMENT -n $env:NAMESPACE -o json |
-                        ConvertFrom-Json
-
-                    if ($LASTEXITCODE -ne 0 -or -not $deployment) {
-                        throw "Could not retrieve deployment details."
-                    }
-
-                    $selector = (
-                        $deployment.spec.selector.matchLabels.PSObject.Properties |
-                        ForEach-Object { "$($_.Name)=$($_.Value)" }
-                    ) -join ","
-
-                    if ([string]::IsNullOrWhiteSpace($selector)) {
-                        throw "Deployment selector is empty."
-                    }
-
-                    $ready = [int]$deployment.status.readyReplicas
-
-                    if ($ready -ne $expectedReplicas) {
-                        throw "Pre-test check failed: expected 2 ready replicas, found $ready."
-                    }
-
-                    $pods = @(
-                        & $env:KUBECTL get pods `
-                            -n $env:NAMESPACE `
-                            -l $selector `
-                            -o jsonpath='{.items[*].metadata.name}'
-                    ) -join ' '
-
-                    if ($LASTEXITCODE -ne 0 -or
-                        [string]::IsNullOrWhiteSpace($pods)) {
-                        throw "Could not find application pods."
-                    }
-
-                    $podNames = @($pods -split '\\s+' | Where-Object { $_ })
-
-                    if ($podNames.Count -lt 2) {
-                        throw "Expected at least two application pods."
-                    }
-
-                    $victim = $podNames[0]
                     Write-Output "Deleting pod/$victim"
 
                     $start = Get-Date
-
-                    & $env:KUBECTL delete pod $victim `
-                        -n $env:NAMESPACE --wait=false
-
-                    if ($LASTEXITCODE -ne 0) {
-                        throw "Failed to delete application pod."
-                    }
+                    & $env:KUBECTL delete pod $victim -n $env:NAMESPACE --wait=false
+                    if ($LASTEXITCODE -ne 0) { throw "Pod deletion failed." }
 
                     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
                     $recovered = $false
-                    $ready = 0
+                    $readyCount = 0
 
                     while ((Get-Date) -lt $deadline) {
-                        $status = & $env:KUBECTL get deployment `
-                            $env:DEPLOYMENT -n $env:NAMESPACE -o json |
-                            ConvertFrom-Json
+                        $json = & $env:KUBECTL get pods -n $env:NAMESPACE `
+                            -l $selector -o json
 
-                        if ($LASTEXITCODE -eq 0 -and $status) {
-                            $ready = [int]$status.status.readyReplicas
-                            $available = [int]$status.status.availableReplicas
+                        if ($LASTEXITCODE -eq 0) {
+                            $data = $json | ConvertFrom-Json
+                            $active = @($data.items | Where-Object {
+                                -not $_.metadata.deletionTimestamp
+                            })
+                            $ready = @($active | Where-Object {
+                                @($_.status.conditions | Where-Object {
+                                    $_.type -eq "Ready" -and $_.status -eq "True"
+                                }).Count -gt 0
+                            })
+                            $readyCount = $ready.Count
+                            $oldPodActive = @($active | Where-Object {
+                                $_.metadata.name -eq $victim
+                            }).Count -gt 0
 
-                            if ($ready -eq $expectedReplicas -and
-                                $available -eq $expectedReplicas) {
+                            if ($readyCount -eq 2 -and -not $oldPodActive) {
                                 $recovered = $true
                                 break
                             }
@@ -237,16 +203,11 @@ pipeline {
                         Start-Sleep -Seconds 2
                     }
 
-                    $recoverySeconds = [math]::Round(
-                        ((Get-Date) - $start).TotalSeconds, 2
-                    )
+                    $elapsed = [math]::Round(((Get-Date) - $start).TotalSeconds, 2)
+                    & $env:KUBECTL get pods -n $env:NAMESPACE -l $selector
 
-                    & $env:KUBECTL get pods `
-                        -n $env:NAMESPACE -l $selector
-
-                    Write-Output "FAILURE TYPE: Single pod deletion"
-                    Write-Output "RECOVERY TIME: $recoverySeconds seconds"
-                    Write-Output "READY REPLICAS: $ready/2"
+                    Write-Output "RECOVERY TIME: $elapsed seconds"
+                    Write-Output "READY PODS: $readyCount/2"
 
                     if (-not $recovered) {
                         Write-Output "TEST RESULT: FAIL"
@@ -262,80 +223,81 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
-                    $expectedReplicas = 2
                     $timeoutSeconds = 120
 
-                    Write-Output "FAILURE TYPE: Simultaneous pod deletion"
-
-                    $deployment = & $env:KUBECTL get deployment `
-                        $env:DEPLOYMENT -n $env:NAMESPACE -o json |
-                        ConvertFrom-Json
-
-                    if ($LASTEXITCODE -ne 0 -or -not $deployment) {
-                        throw "Could not retrieve deployment details."
-                    }
-
-                    $selector = (
-                        $deployment.spec.selector.matchLabels.PSObject.Properties |
-                        ForEach-Object { "$($_.Name)=$($_.Value)" }
-                    ) -join ","
-
-                    if ([string]::IsNullOrWhiteSpace($selector)) {
-                        throw "Deployment selector is empty."
-                    }
-
-                    $ready = [int]$deployment.status.readyReplicas
-
-                    if ($ready -ne $expectedReplicas) {
-                        throw "Pre-test check failed: expected 2 ready replicas, found $ready."
-                    }
-
-                    $pods = @(
-                        & $env:KUBECTL get pods `
-                            -n $env:NAMESPACE `
-                            -l $selector `
-                            -o jsonpath='{.items[*].metadata.name}'
-                    ) -join ' '
-
-                    if ($LASTEXITCODE -ne 0 -or
-                        [string]::IsNullOrWhiteSpace($pods)) {
-                        throw "Could not find application pods."
-                    }
-
-                    $podNames = @($pods -split '\\s+' | Where-Object { $_ })
-
-                    if ($podNames.Count -lt 2) {
-                        throw "Expected two application pods for this test."
-                    }
-
-                    Write-Output "Deleting application pods: $pods"
-
-                    $start = Get-Date
-
-                    & $env:KUBECTL delete pods `
-                        -l $selector `
-                        -n $env:NAMESPACE `
-                        --wait=false
+                    # Wait for a healthy, stable starting state.
+                    & $env:KUBECTL rollout status `
+                        "deployment/$env:DEPLOYMENT" `
+                        -n $env:NAMESPACE --timeout=120s
 
                     if ($LASTEXITCODE -ne 0) {
-                        throw "Failed to delete application pods."
+                        throw "Deployment did not stabilize before simultaneous-failure test."
+                    }
+
+                    $depJson = & $env:KUBECTL get deployment $env:DEPLOYMENT `
+                        -n $env:NAMESPACE -o json
+                    if ($LASTEXITCODE -ne 0) { throw "Cannot read deployment." }
+                    $dep = $depJson | ConvertFrom-Json
+
+                    $selector = ($dep.spec.selector.matchLabels.PSObject.Properties |
+                        ForEach-Object { "$($_.Name)=$($_.Value)" }) -join ","
+
+                    $json = & $env:KUBECTL get pods -n $env:NAMESPACE `
+                        -l $selector -o json
+                    if ($LASTEXITCODE -ne 0) { throw "Cannot list application pods." }
+                    $data = $json | ConvertFrom-Json
+
+                    $readyPods = @($data.items | Where-Object {
+                        -not $_.metadata.deletionTimestamp -and
+                        @($_.status.conditions | Where-Object {
+                            $_.type -eq "Ready" -and $_.status -eq "True"
+                        }).Count -gt 0
+                    })
+
+                    if ($readyPods.Count -ne 2) {
+                        throw "Pre-test check failed: expected 2 ready pods, found $($readyPods.Count)."
+                    }
+
+                    $oldNames = @($readyPods | ForEach-Object {
+                        $_.metadata.name
+                    })
+
+                    Write-Output "FAILURE TYPE: Simultaneous pod deletion"
+                    Write-Output "Deleting both application pods"
+
+                    $start = Get-Date
+                    & $env:KUBECTL delete pods -l $selector `
+                        -n $env:NAMESPACE --wait=false
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Simultaneous pod deletion failed."
                     }
 
                     $deadline = (Get-Date).AddSeconds($timeoutSeconds)
                     $recovered = $false
-                    $ready = 0
+                    $readyCount = 0
 
                     while ((Get-Date) -lt $deadline) {
-                        $status = & $env:KUBECTL get deployment `
-                            $env:DEPLOYMENT -n $env:NAMESPACE -o json |
-                            ConvertFrom-Json
+                        $json = & $env:KUBECTL get pods -n $env:NAMESPACE `
+                            -l $selector -o json
 
-                        if ($LASTEXITCODE -eq 0 -and $status) {
-                            $ready = [int]$status.status.readyReplicas
-                            $available = [int]$status.status.availableReplicas
+                        if ($LASTEXITCODE -eq 0) {
+                            $data = $json | ConvertFrom-Json
+                            $active = @($data.items | Where-Object {
+                                -not $_.metadata.deletionTimestamp
+                            })
+                            $ready = @($active | Where-Object {
+                                @($_.status.conditions | Where-Object {
+                                    $_.type -eq "Ready" -and $_.status -eq "True"
+                                }).Count -gt 0
+                            })
 
-                            if ($ready -eq $expectedReplicas -and
-                                $available -eq $expectedReplicas) {
+                            $readyCount = $ready.Count
+                            $oldPodActive = @($active | Where-Object {
+                                $oldNames -contains $_.metadata.name
+                            }).Count -gt 0
+
+                            if ($readyCount -eq 2 -and -not $oldPodActive) {
                                 $recovered = $true
                                 break
                             }
@@ -344,16 +306,11 @@ pipeline {
                         Start-Sleep -Seconds 2
                     }
 
-                    $recoverySeconds = [math]::Round(
-                        ((Get-Date) - $start).TotalSeconds, 2
-                    )
+                    $elapsed = [math]::Round(((Get-Date) - $start).TotalSeconds, 2)
+                    & $env:KUBECTL get pods -n $env:NAMESPACE -l $selector
 
-                    & $env:KUBECTL get pods `
-                        -n $env:NAMESPACE -l $selector
-
-                    Write-Output "FAILURE TYPE: Simultaneous pod deletion"
-                    Write-Output "RECOVERY TIME: $recoverySeconds seconds"
-                    Write-Output "READY REPLICAS: $ready/2"
+                    Write-Output "RECOVERY TIME: $elapsed seconds"
+                    Write-Output "READY PODS: $readyCount/2"
 
                     if (-not $recovered) {
                         Write-Output "TEST RESULT: FAIL"
