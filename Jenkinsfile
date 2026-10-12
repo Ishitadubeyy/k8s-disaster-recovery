@@ -46,7 +46,7 @@ pipeline {
                         }
 
                         & $kubectl config set-cluster local-cluster `
-                            --server=https://127.0.0.1:64079 `
+                            --server=https://127.0.0.1:49706 `
                             --certificate-authority="$env:K8S_CA" `
                             --embed-certs=true
 
