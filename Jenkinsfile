@@ -195,8 +195,14 @@ pipeline {
                             throw "RECOVERY FAILED: deployment did not return to two ready replicas"
                         }
 
-                        Write-Host "RECOVERY SUCCESS: 2 replicas are ready"
-                    '''
+                        $recoverySeconds = [math]::Round(
+    			((Get-Date) - $start).TotalSeconds, 2
+			)
+
+			Write-Host "TEST RESULT: PASS"
+			Write-Host "FAILURE TYPE: Single pod deletion"
+			Write-Host "RECOVERY TIME: $recoverySeconds seconds"
+			Write-Host "READY REPLICAS: 2/2"                    '''
                 }
             }
         }
