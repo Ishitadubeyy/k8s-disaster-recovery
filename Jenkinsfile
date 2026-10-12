@@ -38,7 +38,7 @@ pipeline {
 
                         # Verify that the Kubernetes API endpoint is reachable.
                         $apiHost = "127.0.0.1"
-                        $apiPort = 64079
+                        $apiPort = 49706
                         $connection = Test-NetConnection $apiHost -Port $apiPort -WarningAction SilentlyContinue
 
                         if (-not $connection.TcpTestSucceeded) {
