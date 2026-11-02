@@ -35,6 +35,13 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
+                    # Use the actual Windows Minikube kubeconfig
+                    $env:KUBECONFIG = Join-Path $env:USERPROFILE ".kube\\config"
+
+                    if (-not (Test-Path $env:KUBECONFIG)) {
+                        throw "Minikube kubeconfig not found: $env:KUBECONFIG"
+                    }
+
                     if (-not (Test-Path $env:KUBECTL)) {
                         throw "kubectl not found: $env:KUBECTL"
                     }
@@ -58,6 +65,13 @@ pipeline {
                         throw "Minikube is unavailable."
                     }
 
+                    # Refresh the Minikube context
+                    & $env:MINIKUBE update-context -p $env:MINIKUBE_PROFILE
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Could not update Minikube context."
+                    }
+
+                    # Verify Minikube is running
                     & $env:MINIKUBE status -p $env:MINIKUBE_PROFILE
                     if ($LASTEXITCODE -ne 0) {
                         throw "Minikube is not running."
@@ -87,14 +101,16 @@ pipeline {
                             throw "Kubernetes CA certificate not found."
                         }
 
+                        # Check the current Minikube API port
                         $connection = Test-NetConnection 127.0.0.1 `
-                            -Port 49706 `
+                            -Port 51387 `
                             -WarningAction SilentlyContinue
 
                         if (-not $connection.TcpTestSucceeded) {
                             throw "Kubernetes API is unreachable at $env:K8S_API."
                         }
 
+                        # Create a separate temporary Jenkins kubeconfig
                         if (Test-Path $env:KUBECONFIG) {
                             Remove-Item $env:KUBECONFIG -Force
                         }
@@ -147,21 +163,31 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
+                    # Minikube commands must use the real Windows kubeconfig
+                    $env:KUBECONFIG = Join-Path $env:USERPROFILE ".kube\\config"
+
+                    if (-not (Test-Path $env:KUBECONFIG)) {
+                        throw "Minikube kubeconfig not found: $env:KUBECONFIG"
+                    }
+
                     $frontend = Join-Path $env:WORKSPACE "app\\frontend"
                     $backend = Join-Path $env:WORKSPACE "app\\backend"
 
+                    # Build frontend
                     docker build -t weatherwatch-frontend:latest $frontend
 
                     if ($LASTEXITCODE -ne 0) {
                         throw "Frontend image build failed."
                     }
 
+                    # Build backend
                     docker build -t weatherwatch-backend:latest $backend
 
                     if ($LASTEXITCODE -ne 0) {
                         throw "Backend image build failed."
                     }
 
+                    # Load frontend image into Minikube
                     & $env:MINIKUBE image load weatherwatch-frontend:latest `
                         -p $env:MINIKUBE_PROFILE
 
@@ -169,6 +195,7 @@ pipeline {
                         throw "Frontend image loading failed."
                     }
 
+                    # Load backend image into Minikube
                     & $env:MINIKUBE image load weatherwatch-backend:latest `
                         -p $env:MINIKUBE_PROFILE
 
@@ -176,6 +203,7 @@ pipeline {
                         throw "Backend image loading failed."
                     }
 
+                    # Load PostgreSQL image
                     & $env:MINIKUBE image load postgres:16-alpine `
                         -p $env:MINIKUBE_PROFILE
 
@@ -193,6 +221,7 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
+                    # Verify database Secret exists
                     $secret = & $env:KUBECTL get secret `
                         weatherwatch-db-credentials `
                         -n $env:NAMESPACE `
@@ -207,6 +236,7 @@ pipeline {
                         throw "Database Secret is missing."
                     }
 
+                    # Apply Kubernetes manifests
                     $manifest = Join-Path $env:WORKSPACE "k8s"
 
                     & $env:KUBECTL apply -f $manifest `
@@ -216,6 +246,7 @@ pipeline {
                         throw "Kubernetes manifests could not be applied."
                     }
 
+                    # Wait for all deployments
                     foreach ($deployment in @(
                         "weatherwatch-postgres",
                         "weatherwatch-backend",
@@ -241,18 +272,21 @@ pipeline {
                 powershell '''
                     $ErrorActionPreference = "Stop"
 
+                    Write-Output "Checking Kubernetes pods..."
                     & $env:KUBECTL get pods -n $env:NAMESPACE
 
                     if ($LASTEXITCODE -ne 0) {
                         throw "Pod health check failed."
                     }
 
+                    Write-Output "Checking deployments..."
                     & $env:KUBECTL get deployments -n $env:NAMESPACE
 
                     if ($LASTEXITCODE -ne 0) {
                         throw "Deployment health check failed."
                     }
 
+                    Write-Output "Checking services..."
                     & $env:KUBECTL get services -n $env:NAMESPACE
 
                     if ($LASTEXITCODE -ne 0) {
@@ -301,6 +335,7 @@ pipeline {
                         "Recovery tests did not produce a report. Check Jenkins Console Output."
                 }
 
+                # Remove only the temporary Jenkins kubeconfig
                 if (Test-Path $env:KUBECONFIG) {
                     Remove-Item $env:KUBECONFIG -Force
                     Write-Output "Temporary kubeconfig removed."
