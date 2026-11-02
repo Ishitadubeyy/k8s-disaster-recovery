@@ -13,7 +13,7 @@ pipeline {
         KUBECONFIG = "${WORKSPACE}\\jenkins-kubeconfig"
         KUBECTL = 'C:\\Users\\ishit\\AppData\\Local\\Programs\\DockerDesktop\\resources\\bin\\kubectl.exe'
         MINIKUBE = 'C:\\minikube\\minikube.exe'
-        K8S_API = 'https://127.0.0.1:49706'
+        K8S_API = 'https://127.0.0.1:51387'
         NAMESPACE = 'default'
         REPORT = 'recovery-report.txt'
         MINIKUBE_PROFILE = 'local-cluster'
