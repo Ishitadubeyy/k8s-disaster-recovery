@@ -1,5 +1,8 @@
+
 pipeline {
-    agent any
+    agent {
+        label 'weatherwatch'
+    }
 
     options {
         timestamps()
@@ -12,49 +15,114 @@ pipeline {
         K8S_API = 'https://127.0.0.1:49706'
         NAMESPACE = 'default'
         REPORT = 'recovery-report.txt'
+        MINIKUBE_PROFILE = 'local-cluster'
     }
 
     stages {
+
         stage('Checkout') {
             steps {
                 checkout scm
-                powershell 'Write-Output "WeatherWatch repository checked out."'
+                powershell '''
+                    Write-Output "WeatherWatch repository checked out."
+                '''
+            }
+        }
+
+        stage('Verify Tools') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
+                    if (-not (Test-Path $env:KUBECTL)) {
+                        throw "kubectl not found."
+                    }
+
+                    docker --version
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Docker is unavailable."
+                    }
+
+                    minikube version
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Minikube is unavailable."
+                    }
+
+                    & minikube status -p $env:MINIKUBE_PROFILE
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Minikube is not running."
+                    }
+
+                    Write-Output "All required tools verified."
+                '''
             }
         }
 
         stage('Configure Kubernetes Access') {
             steps {
                 withCredentials([
-                    string(credentialsId: 'k8s-jenkins-token', variable: 'K8S_TOKEN'),
-                    file(credentialsId: 'k8s-cluster-ca', variable: 'K8S_CA_FILE')
+                    string(
+                        credentialsId: 'k8s-jenkins-token',
+                        variable: 'K8S_TOKEN'
+                    ),
+                    file(
+                        credentialsId: 'k8s-cluster-ca',
+                        variable: 'K8S_CA_FILE'
+                    )
                 ]) {
                     powershell '''
                         $ErrorActionPreference = "Stop"
-                        if (-not (Test-Path $env:KUBECTL)) {
-                            throw "kubectl not found: $env:KUBECTL"
+
+                        if (-not (Test-Path $env:K8S_CA_FILE)) {
+                            throw "Kubernetes CA certificate not found."
                         }
-                        if (-not (Test-NetConnection 127.0.0.1 -Port 49706 `
-                            -WarningAction SilentlyContinue).TcpTestSucceeded) {
+
+                        if (-not (Test-NetConnection 127.0.0.1 -Port 49706 -WarningAction SilentlyContinue).TcpTestSucceeded) {
                             throw "Kubernetes API is unreachable at $env:K8S_API."
                         }
+
                         if (Test-Path $env:KUBECONFIG) {
                             Remove-Item $env:KUBECONFIG -Force
                         }
+
                         & $env:KUBECTL config set-cluster local-cluster `
                             "--server=$env:K8S_API" `
-                            "--certificate-authority=$env:K8S_CA_FILE" --embed-certs=true
-                        if ($LASTEXITCODE -ne 0) { throw "Cluster configuration failed." }
+                            "--certificate-authority=$env:K8S_CA_FILE" `
+                            --embed-certs=true
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Cluster configuration failed."
+                        }
+
                         & $env:KUBECTL config set-credentials jenkins-weatherwatch `
                             "--token=$env:K8S_TOKEN"
-                        if ($LASTEXITCODE -ne 0) { throw "Credential configuration failed." }
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Credential configuration failed."
+                        }
+
                         & $env:KUBECTL config set-context jenkins-weatherwatch `
-                            --cluster=local-cluster --user=jenkins-weatherwatch `
+                            --cluster=local-cluster `
+                            --user=jenkins-weatherwatch `
                             "--namespace=$env:NAMESPACE"
-                        if ($LASTEXITCODE -ne 0) { throw "Context configuration failed." }
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Context configuration failed."
+                        }
+
                         & $env:KUBECTL config use-context jenkins-weatherwatch
-                        if ($LASTEXITCODE -ne 0) { throw "Context selection failed." }
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Context selection failed."
+                        }
+
                         & $env:KUBECTL get nodes
-                        if ($LASTEXITCODE -ne 0) { throw "Kubernetes access failed." }
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Kubernetes access failed."
+                        }
+
+                        Write-Output "Kubernetes connection successful."
                     '''
                 }
             }
@@ -64,17 +132,36 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
+
                     $frontend = Join-Path $env:WORKSPACE "app\\frontend"
                     $backend = Join-Path $env:WORKSPACE "app\\backend"
 
-                    & docker build -t weatherwatch-frontend:latest $frontend
-                    if ($LASTEXITCODE -ne 0) { throw "Frontend image build failed." }
-                    & docker build -t weatherwatch-backend:latest $backend
-                    if ($LASTEXITCODE -ne 0) { throw "Backend image build failed." }
-                    & minikube image load weatherwatch-frontend:latest
-                    if ($LASTEXITCODE -ne 0) { throw "Could not load the frontend image into Minikube." }
-                    & minikube image load weatherwatch-backend:latest
-                    if ($LASTEXITCODE -ne 0) { throw "Could not load the backend image into Minikube." }
+                    docker build -t weatherwatch-frontend:latest $frontend
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Frontend image build failed."
+                    }
+
+                    docker build -t weatherwatch-backend:latest $backend
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Backend image build failed."
+                    }
+
+                    & minikube image load weatherwatch-frontend:latest -p $env:MINIKUBE_PROFILE
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Frontend image loading failed."
+                    }
+
+                    & minikube image load weatherwatch-backend:latest -p $env:MINIKUBE_PROFILE
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Backend image loading failed."
+                    }
+
+                    & minikube image load postgres:16-alpine -p $env:MINIKUBE_PROFILE
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "PostgreSQL image loading failed."
+                    }
+
+                    Write-Output "All application images built and loaded."
                 '''
             }
         }
@@ -83,22 +170,25 @@ pipeline {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
+
                     $secret = & $env:KUBECTL get secret weatherwatch-db-credentials `
                         -n $env:NAMESPACE --ignore-not-found -o name
-                    if ($LASTEXITCODE -ne 0) { throw "Could not check the database Secret." }
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Could not check database Secret."
+                    }
+
                     if (-not $secret) {
-                        $bytes = New-Object byte[] 32
-                        $random = [System.Security.Cryptography.RandomNumberGenerator]::Create()
-                        try { $random.GetBytes($bytes) } finally { $random.Dispose() }
-                        $password = [Convert]::ToBase64String($bytes)
-                        & $env:KUBECTL create secret generic weatherwatch-db-credentials `
-                            "--from-literal=POSTGRES_PASSWORD=$password" -n $env:NAMESPACE
-                        if ($LASTEXITCODE -ne 0) { throw "Could not create database credentials Secret." }
+                        throw "Database Secret is missing. Create it before deployment."
                     }
 
                     $manifest = Join-Path $env:WORKSPACE "k8s"
+
                     & $env:KUBECTL apply -f $manifest -n $env:NAMESPACE
-                    if ($LASTEXITCODE -ne 0) { throw "Kubernetes manifests could not be applied." }
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Kubernetes manifests could not be applied."
+                    }
 
                     foreach ($deployment in @(
                         "weatherwatch-postgres",
@@ -107,20 +197,57 @@ pipeline {
                     )) {
                         & $env:KUBECTL rollout status "deployment/$deployment" `
                             -n $env:NAMESPACE --timeout=240s
-                        if ($LASTEXITCODE -ne 0) { throw "Deployment $deployment did not become ready." }
+
+                        if ($LASTEXITCODE -ne 0) {
+                            throw "Deployment $deployment did not become ready."
+                        }
                     }
+
+                    Write-Output "WeatherWatch deployment successful."
                 '''
             }
         }
 
-        stage('Health and Disaster Recovery Tests') {
+        stage('Health Checks') {
             steps {
                 powershell '''
                     $ErrorActionPreference = "Stop"
+
+                    & $env:KUBECTL get pods -n $env:NAMESPACE
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Pod health check failed."
+                    }
+
+                    & $env:KUBECTL get services -n $env:NAMESPACE
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Service health check failed."
+                    }
+
+                    Write-Output "Kubernetes health checks completed."
+                '''
+            }
+        }
+
+        stage('Disaster Recovery Tests') {
+            steps {
+                powershell '''
+                    $ErrorActionPreference = "Stop"
+
                     $script = Join-Path $env:WORKSPACE "scripts\\recovery-test.ps1"
-                    & $script -Kubectl $env:KUBECTL -Workspace $env:WORKSPACE `
+
+                    if (-not (Test-Path $script)) {
+                        throw "Recovery test script not found."
+                    }
+
+                    & $script -Kubectl $env:KUBECTL `
+                        -Workspace $env:WORKSPACE `
                         -Namespace $env:NAMESPACE
-                    if ($LASTEXITCODE -ne 0) { throw "WeatherWatch recovery tests failed." }
+
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "WeatherWatch recovery tests failed."
+                    }
+
+                    Write-Output "Disaster recovery tests completed."
                 '''
             }
         }
@@ -129,17 +256,31 @@ pipeline {
     post {
         always {
             powershell '''
-                if (-not (Test-Path (Join-Path $env:WORKSPACE $env:REPORT))) {
-                    Set-Content (Join-Path $env:WORKSPACE $env:REPORT) `
-                        "WeatherWatch recovery tests did not run. Review the pipeline stage results."
+                $reportPath = Join-Path $env:WORKSPACE $env:REPORT
+
+                if (-not (Test-Path $reportPath)) {
+                    Set-Content $reportPath `
+                        "WeatherWatch recovery tests did not produce a report. Review pipeline logs."
                 }
+
                 if (Test-Path $env:KUBECONFIG) {
                     Remove-Item $env:KUBECONFIG -Force
                     Write-Output "Temporary Kubernetes configuration removed."
                 }
             '''
-            archiveArtifacts artifacts: 'recovery-report.txt', allowEmptyArchive: false
-            echo 'WeatherWatch pipeline finished. Review stage results and the archived recovery report.'
+
+            archiveArtifacts artifacts: 'recovery-report.txt',
+                allowEmptyArchive: false
+
+            echo 'WeatherWatch pipeline finished. Review stage results and recovery report.'
+        }
+
+        success {
+            echo 'WEATHERWATCH CI/CD AND DISASTER RECOVERY PIPELINE PASSED.'
+        }
+
+        failure {
+            echo 'PIPELINE FAILED. Check Console Output for the failed stage.'
         }
     }
 }
