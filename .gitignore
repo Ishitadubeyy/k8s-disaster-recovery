@@ -1,3 +1,13 @@
 
 k8s-ca.crt
 k8s-ca-base64.txt
+.env
+node_modules/
+**/node_modules/
+**/dist/
+recovery-report.txt
+jenkins-kubeconfig
+http-*-out.txt
+http-*-err.txt
+port-forward-*-out.txt
+port-forward-*-err.txt

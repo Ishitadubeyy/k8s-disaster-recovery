@@ -1,0 +1,15 @@
+CREATE TABLE IF NOT EXISTS favorites (
+    id BIGSERIAL PRIMARY KEY,
+    city TEXT NOT NULL,
+    city_key TEXT NOT NULL UNIQUE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS search_history (
+    id BIGSERIAL PRIMARY KEY,
+    city TEXT NOT NULL,
+    searched_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS search_history_searched_at_idx
+    ON search_history (searched_at DESC);

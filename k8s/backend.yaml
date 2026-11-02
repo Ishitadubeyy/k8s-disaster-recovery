@@ -1,0 +1,62 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: weatherwatch-backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: weatherwatch-backend
+  template:
+    metadata:
+      labels:
+        app: weatherwatch-backend
+    spec:
+      containers:
+        - name: backend
+          image: weatherwatch-backend:latest
+          imagePullPolicy: Never
+          ports:
+            - name: http
+              containerPort: 3001
+          envFrom:
+            - configMapRef:
+                name: weatherwatch-config
+          env:
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: weatherwatch-db-credentials
+                  key: POSTGRES_PASSWORD
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+          livenessProbe:
+            httpGet:
+              path: /live
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: weatherwatch-backend
+spec:
+  selector:
+    app: weatherwatch-backend
+  ports:
+    - name: http
+      port: 3001
+      targetPort: http
